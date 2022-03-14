@@ -1,0 +1,11 @@
+[Unit]
+Description=CI Shortcut Server
+After=network.target
+
+[Service]
+User=root
+Type=Simple
+ExecStart=/root/ci-shortcuts/shortcuts /root/ci-shortcuts/sqlite.db :80
+
+[Install]
+WantedBy=multi-user.target
