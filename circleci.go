@@ -54,9 +54,11 @@ type Artifact struct {
 	BuildNum  int       `json:"build_num"`
 }
 
-func getURL(url string) ([]byte, error) {
-	client := &http.Client{}
+type Client struct {
+	*http.Client
+}
 
+func (c *Client) Get(url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -64,16 +66,17 @@ func getURL(url string) ([]byte, error) {
 
 	req.Header.Add("Accept", "application/json")
 
-	resp, err := client.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
+	defer resp.Body.Close()
 	return ioutil.ReadAll(resp.Body)
 }
 
-func getBuilds(limit int, offset int) ([]Build, error) {
-	resp, err := getURL(baseURL + fmt.Sprintf("?shallow=true&limit=%v&offset=%v", limit, offset))
+func (c *Client) GetBuilds(limit int, offset int) ([]Build, error) {
+	resp, err := c.Get(baseURL + fmt.Sprintf("?shallow=true&limit=%v&offset=%v", limit, offset))
 	if err != nil {
 		return nil, err
 	}
@@ -83,8 +86,8 @@ func getBuilds(limit int, offset int) ([]Build, error) {
 	return builds, err
 }
 
-func getArtifacts(buildNum int) ([]Artifact, error) {
-	resp, err := getURL(baseURL + fmt.Sprintf("/%v/artifacts", buildNum))
+func (c *Client) GetArtifacts(buildNum int) ([]Artifact, error) {
+	resp, err := c.Get(baseURL + fmt.Sprintf("/%v/artifacts", buildNum))
 
 	var artifacts []Artifact
 	err = json.Unmarshal(resp, &artifacts)
@@ -95,25 +98,25 @@ func getArtifacts(buildNum int) ([]Artifact, error) {
 	return artifacts, err
 }
 
-func getArtifactsWithCache(db DB, b Build) ([]Artifact, error) {
+func (c *Client) GetArtifactsWithCache(db DB, b Build) ([]Artifact, error) {
 	if b.Archived {
 		// use cached artifacts
-		return GetArtifacts(db, b.BuildNum)
+		return db.GetArtifacts(b.BuildNum)
 	}
 
-	artifacts, err := getArtifacts(b.BuildNum)
+	artifacts, err := c.GetArtifacts(b.BuildNum)
 	if err != nil {
 		return nil, err
 	}
 
 	if b.Lifecycle == "finished" {
 		// cache these artifacts
-		err = UpsertArtifacts(db, artifacts)
+		err = db.UpsertArtifacts(artifacts)
 		if err != nil {
 			return nil, err
 		}
 
-		err = ArchiveBuild(db, b.BuildNum)
+		err = db.ArchiveBuild(b.BuildNum)
 		if err != nil {
 			return nil, err
 		}
@@ -122,9 +125,9 @@ func getArtifactsWithCache(db DB, b Build) ([]Artifact, error) {
 	return artifacts, nil
 }
 
-func BootstrapBuilds(db DB) (err error) {
+func (c *Client) BootstrapBuilds(db RootDB) (err error) {
 	println("bootstrapping database, this may take a while...")
-	var tx bun.Tx
+	var tx TxDB
 	tx, err = db.Begin()
 	if err != nil {
 		return
@@ -148,7 +151,7 @@ func BootstrapBuilds(db DB) (err error) {
 
 	for offset := 0; true; offset += 100 {
 		var builds []Build
-		builds, err = getBuilds(100, offset)
+		builds, err = c.GetBuilds(100, offset)
 		if err != nil {
 			return
 		}
@@ -162,7 +165,7 @@ func BootstrapBuilds(db DB) (err error) {
 				)
 				return
 			}
-			err = UpsertBuild(tx, b)
+			err = tx.UpsertBuild(b)
 			if err != nil {
 				return
 			}
@@ -177,8 +180,8 @@ func BootstrapBuilds(db DB) (err error) {
 	return nil
 }
 
-func RefreshBuilds(db DB, afterBuildNum int) (err error) {
-	var tx bun.Tx
+func (c *Client) RefreshBuilds(db RootDB, afterBuildNum int) (err error) {
+	var tx TxDB
 	tx, err = db.Begin()
 	if err != nil {
 		return
@@ -195,7 +198,7 @@ func RefreshBuilds(db DB, afterBuildNum int) (err error) {
 
 	for offset := 0; true; offset += 100 {
 		var builds []Build
-		builds, err = getBuilds(100, offset)
+		builds, err = c.GetBuilds(100, offset)
 		if err != nil {
 			return
 		}
@@ -207,7 +210,7 @@ func RefreshBuilds(db DB, afterBuildNum int) (err error) {
 			if b.BuildNum <= afterBuildNum {
 				return
 			}
-			err = UpsertBuild(tx, b)
+			err = tx.UpsertBuild(b)
 			if err != nil {
 				return
 			}
@@ -224,13 +227,13 @@ Strategy:
 - have a force-refresh page that triggers the scrape when a user loads the page
 */
 
-func startupDB(dbPath string) (DB, error) {
+func (c *Client) StartupDB(dbPath string) (RootDB, error) {
 	db, err := NewDB(dbPath)
 	if err != nil {
 		return db, err
 	}
 
-	err = refreshDB(db, true)
+	err = c.RefreshDB(db, true)
 	if err != nil {
 		return db, err
 	}
@@ -238,13 +241,13 @@ func startupDB(dbPath string) (DB, error) {
 	return db, nil
 }
 
-func refreshDB(db DB, allowBootstrap bool) error {
-	oldestUnfinished, err := OldestUnfinishedBuild(db)
+func (c *Client) RefreshDB(db RootDB, allowBootstrap bool) error {
+	oldestUnfinished, err := db.OldestUnfinishedBuild()
 	if err != nil {
 		return err
 	}
 
-	latestFinished, err := LatestFinishedBefore(db, oldestUnfinished)
+	latestFinished, err := db.LatestFinishedBefore(oldestUnfinished)
 	if err != nil {
 		return err
 	}
@@ -254,12 +257,12 @@ func refreshDB(db DB, allowBootstrap bool) error {
 		if !allowBootstrap {
 			return errors.New("database still needs bootstrap!")
 		}
-		err = BootstrapBuilds(db)
+		err = c.BootstrapBuilds(db)
 		if err != nil {
 			return err
 		}
 	} else {
-		err = RefreshBuilds(db, latestFinished.BuildNum)
+		err = c.RefreshBuilds(db, latestFinished.BuildNum)
 		if err != nil {
 			return err
 		}
@@ -268,7 +271,7 @@ func refreshDB(db DB, allowBootstrap bool) error {
 	return nil
 }
 
-func refreshBuildsThread(db DB, cond *sync.Cond, ready *bool) {
+func (c *Client) RefreshBuildsThread(db RootDB, cond *sync.Cond, ready *bool) {
 	setReady := func() {
 		cond.L.Lock()
 		defer cond.L.Unlock()
@@ -280,7 +283,7 @@ func refreshBuildsThread(db DB, cond *sync.Cond, ready *bool) {
 		// refresh every 15 seconds
 		time.Sleep(15 * time.Second)
 		fmt.Printf("refreshing builds\n")
-		err := refreshDB(db, false)
+		err := c.RefreshDB(db, false)
 		if err != nil {
 			fmt.Printf("error in artifact thread: %v\n", err.Error())
 		}
@@ -288,7 +291,7 @@ func refreshBuildsThread(db DB, cond *sync.Cond, ready *bool) {
 	}
 }
 
-func refreshArtifactsThread(db DB, cond *sync.Cond, ready *bool) {
+func (c *Client) RefreshArtifactsThread(db DB, cond *sync.Cond, ready *bool) {
 	awaitReady := func() {
 		cond.L.Lock()
 		defer cond.L.Unlock()
@@ -303,7 +306,7 @@ func refreshArtifactsThread(db DB, cond *sync.Cond, ready *bool) {
 	cacheMany := func() error {
 		for {
 			// grab the latest archivable build
-			b, err := GetArchivableBuild(db)
+			b, err := db.GetArchivableBuild()
 			if err != nil {
 				return err
 			}
@@ -314,18 +317,18 @@ func refreshArtifactsThread(db DB, cond *sync.Cond, ready *bool) {
 			}
 
 			fmt.Printf("fetching artifacts for %v\n", b.BuildNum)
-			artifacts, err := getArtifacts(b.BuildNum)
+			artifacts, err := c.GetArtifacts(b.BuildNum)
 			if err != nil {
 				return err
 			}
 
 			// cache these artifacts
-			err = UpsertArtifacts(db, artifacts)
+			err = db.UpsertArtifacts(artifacts)
 			if err != nil {
 				return err
 			}
 
-			err = ArchiveBuild(db, b.BuildNum)
+			err = db.ArchiveBuild(b.BuildNum)
 			if err != nil {
 				return err
 			}

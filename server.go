@@ -14,7 +14,8 @@ import (
 )
 
 type Server struct {
-	DB DB
+	DB RootDB
+	Client Client
 }
 
 // POST /pull/:pull
@@ -24,7 +25,7 @@ func (s *Server) getPull(c echo.Context) error {
 		return c.String(http.StatusOK, err.Error())
 	}
 
-	builds, err := GetBuildsForPull(s.DB, pull)
+	builds, err := s.DB.GetBuildsForPull(pull)
 	if err != nil {
 		return c.String(http.StatusOK, err.Error())
 	}
@@ -43,7 +44,7 @@ func (s *Server) getPull(c echo.Context) error {
 	var webui string
 
 	for _, b := range builds {
-		artifacts, err := getArtifactsWithCache(s.DB, b)
+		artifacts, err := s.Client.GetArtifactsWithCache(s.DB, b)
 		if err != nil {
 			return c.String(http.StatusOK, err.Error())
 		}
@@ -102,22 +103,24 @@ func main() {
 		os.Exit(1)
 	}
 
+	client := Client{&http.Client{}}
+
 	dbPath := os.Args[1]
 	srvSpec := os.Args[2]
 
-	db, err := startupDB(dbPath)
+	db, err := client.StartupDB(dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	srv := Server{db, client}
 
 	ready := true
 	mutex := sync.Mutex{}
 	cond := sync.NewCond(&mutex)
 
-	go refreshArtifactsThread(db, cond, &ready)
-	go refreshBuildsThread(db, cond, &ready)
-
-	srv := Server{db}
+	go client.RefreshArtifactsThread(db, cond, &ready)
+	go client.RefreshBuildsThread(db, cond, &ready)
 
 	e := echo.New()
 	e.GET("/pull/:pull", srv.getPull)
