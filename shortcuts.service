@@ -3,9 +3,10 @@ Description=CI Shortcut Server
 After=network.target
 
 [Service]
-User=root
+User=shortcuts
+Group=shortcuts
 Type=Simple
-ExecStart=/root/ci-shortcuts/shortcuts /root/ci-shortcuts/sqlite.db :80
+ExecStart=/usr/local/bin/shortcuts /var/cache/shortcuts/sqlite.db :5729
 
 [Install]
 WantedBy=multi-user.target
