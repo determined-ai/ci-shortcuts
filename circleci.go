@@ -125,99 +125,71 @@ func (c *Client) GetArtifactsWithCache(db DB, b Build) ([]Artifact, error) {
 	return artifacts, nil
 }
 
-func (c *Client) BootstrapBuilds(db RootDB) (err error) {
-	println("bootstrapping database, this may take a while...")
-	var tx TxDB
-	tx, err = db.Begin()
-	if err != nil {
-		return
-	}
+func (c *Client) BootstrapBuilds(db RootDB) error {
+	return db.RunInTx(func(tx DB) error {
+		println("bootstrapping database, this may take a while...")
+		var nbuilds int
+		var nreported int
 
-	var nbuilds int
-	var nreported int
+		// Our goal is linking to artifacts, which last for 30 days.
+		boundary := time.Now().AddDate(0, 0, -30)
 
-	defer func(){
-		if err != nil {
-			_ = tx.Rollback()
-		} else {
-			err = tx.Commit()
-			fmt.Printf("bootstrapping database complete, %v builds found.\n", nbuilds)
-		}
-		return
-	}()
-
-	// Our goal is linking to artifacts, which last for 30 days.
-	boundary := time.Now().AddDate(0, 0, -30)
-
-	for offset := 0; true; offset += 100 {
-		var builds []Build
-		builds, err = c.GetBuilds(100, offset)
-		if err != nil {
-			return
-		}
-		if len(builds) == 0 {
-			return
-		}
-		for _, b := range builds {
-			if !b.StartTime.After(boundary) {
-				fmt.Printf(
-					"Quitting after 30 days of builds; artifacts won't exist further back.\n",
-				)
-				return
-			}
-			err = tx.UpsertBuild(b)
+		for offset := 0; true; offset += 100 {
+			var builds []Build
+			builds, err := c.GetBuilds(100, offset)
 			if err != nil {
-				return
+				return err
 			}
-			nbuilds++
+			if len(builds) == 0 {
+				break
+			}
+			for _, b := range builds {
+				if !b.StartTime.After(boundary) {
+					fmt.Printf(
+						"Quitting after 30 days of builds; artifacts won't exist further back.\n",
+					)
+					goto report
+				}
+				err = tx.UpsertBuild(b)
+				if err != nil {
+					return err
+				}
+				nbuilds++
+			}
+			if nbuilds >= nreported + 1000 {
+				nreported = nbuilds
+				fmt.Printf("%v builds found so far...\n", nbuilds)
+			}
 		}
-		if nbuilds >= nreported + 1000 {
-			nreported = nbuilds
-			fmt.Printf("%v builds found so far...\n", nbuilds)
-		}
-	}
 
-	return nil
+	report:
+		fmt.Printf("bootstrapping database complete, %v builds found.\n", nbuilds)
+		return nil
+	})
 }
 
-func (c *Client) RefreshBuilds(db RootDB, afterBuildNum int) (err error) {
-	var tx TxDB
-	tx, err = db.Begin()
-	if err != nil {
-		return
-	}
-
-	defer func(){
-		if err != nil {
-			_ = tx.Rollback()
-		} else {
-			err = tx.Commit()
-		}
-		return
-	}()
-
-	for offset := 0; true; offset += 100 {
-		var builds []Build
-		builds, err = c.GetBuilds(100, offset)
-		if err != nil {
-			return
-		}
-		if len(builds) == 0 {
-			fmt.Printf("ran out of builds during a refresh??\n")
-			return
-		}
-		for _, b := range builds {
-			if b.BuildNum <= afterBuildNum {
-				return
-			}
-			err = tx.UpsertBuild(b)
+func (c *Client) RefreshBuilds(db RootDB, afterBuildNum int) (error) {
+	return db.RunInTx(func(tx DB) error {
+		for offset := 0; true; offset += 100 {
+			builds, err := c.GetBuilds(100, offset)
 			if err != nil {
-				return
+				return err
+			}
+			if len(builds) == 0 {
+				return errors.New("ran out of builds during a refresh??")
+			}
+			for _, b := range builds {
+				if b.BuildNum <= afterBuildNum {
+					return nil
+				}
+				err = tx.UpsertBuild(b)
+				if err != nil {
+					return err
+				}
 			}
 		}
-	}
-
-	return nil
+		return nil
+	})
 }
 
 /*

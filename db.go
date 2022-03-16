@@ -23,9 +23,9 @@ type DBLike interface {
 }
 
 // DB is our OO-style database interface
-// Both RootDB and TxDB implement this, but:
-//  - RootDB has a .Begin() method that returns a TxDB
-//  - TxDB has .Commit() and .Rollback() methods
+// Both RootDB and txDB implement this, but:
+//  - RootDB has a .RunInTx() method that results in a txDB
+//  - txDB is not exposed
 type DB interface {
 	UpsertBuild(b Build) error
 	GetBuild(buildNum int) (*Build, error)
@@ -47,7 +47,7 @@ type dbImpl struct {
 }
 
 // RootDB implements DBLike and dbImpl.
-// Additionally RootDB has a Begin() method.
+// Additionally RootDB has a RunInTx() method.
 type RootDB struct {
 	// bun.DB makes RootDB implement DBLike
 	*bun.DB
@@ -55,19 +55,14 @@ type RootDB struct {
 	dbImpl
 }
 
-// TxDB provides the same OO-style database, plus the usual bun.Tx functions
-// TxDB implements DBLike and dbImple.
-// Additionally it has .Rollback() and .Commit() mechanisms offered by bun.Tx.
-type TxDB struct {
-	*bun.Tx
-	// dbImpl will just contain another pointer to the *bun.Tx
-	dbImpl
-}
-
-// RootDB.Begin() returns a bun.Tx wrapped in a TxDB.
-func (db *RootDB) Begin() (TxDB, error)  {
-	tx, err := db.DB.Begin()
-	return TxDB{&tx, dbImpl{&tx}}, err
+// RootDB.RunInTx() wraps bun.DB.RunInTx to provide the DB interface without giving access to the
+// actual bun.Tx object.
+func (db *RootDB) RunInTx(fn func(DB) error) error {
+	bunFn := func(_ context.Context, tx bun.Tx) error {
+		txdb := dbImpl{&tx}
+		return fn(txdb)
+	}
+	return db.DB.RunInTx(context.Background(), nil, bunFn)
 }
 
 func NewDB(dbPath string) (RootDB, error) {
