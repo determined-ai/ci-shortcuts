@@ -19,16 +19,25 @@ type Server struct {
 	Client Client
 }
 
-// POST /pull/:pull
-func (s *Server) getPull(c echo.Context) error {
-	pull, err := strconv.Atoi(c.Param("pull"))
-	if err != nil {
-		return c.String(http.StatusOK, err.Error())
-	}
+type SearchSpec struct {
+	Suffix string
+	Result string
+}
 
+const (
+	harnessSuffix = "cov-html/harness/index.html"
+	modelHubSuffix = "cov-html/model_hub/index.html"
+	masterSuffix = "go-coverage/master-coverage.html"
+	agentSuffix = "go-coverage/agent-coverage.html"
+	webuiSuffix = "webui/react/coverage/lcov-report/index.html"
+)
+
+// findMostRecent searches artifacts in reverse chronological order looking for the most recent of
+// each SearchSpec, caching any artifacts it had to pull as it goes.
+func (s *Server) findMostRecent(pull int, specs ...*SearchSpec) error {
 	builds, err := cibuild.GetBuildsForPull(pull)
 	if err != nil {
-		return c.String(http.StatusOK, err.Error())
+		return nil
 	}
 
 	// sort builds by build number, most recent (larger build numbers) first
@@ -37,39 +46,101 @@ func (s *Server) getPull(c echo.Context) error {
 	}
 	sort.Slice(builds, lessFn)
 
-	// find the most recent display urls for each coverage report
-	var harness string
-	var modelHub string
-	var master string
-	var agent string
-	var webui string
-
+	// find the most recent display urls for each coverage report requested
 	for _, b := range builds {
 		artifacts, err := s.Client.GetArtifactsWithCache(b)
 		if err != nil {
-			return c.String(http.StatusOK, err.Error())
+			return err
 		}
 		for _, a := range artifacts {
-			if harness == "" && strings.HasSuffix(a.URL, "cov-html/harness/index.html") {
-				harness = a.URL
+			// check if this matches any of our specs
+			for i := 0; i < len(specs); i++ {
+				if !strings.HasSuffix(a.URL, specs[i].Suffix) {
+					continue
+				}
+				// we have a match!
+				specs[i].Result = a.URL
+				// remove this spec from our list of specs
+				last := len(specs)-1
+				if i < last {
+					specs[i] = specs[last]
+				}
+				specs = specs[:last]
+				// specs[i] changed, so re-evaluate it
+				i--;
 			}
-			if modelHub == "" && strings.HasSuffix(a.URL, "cov-html/model_hub/index.html") {
-				modelHub = a.URL
-			}
-			if master == "" && strings.HasSuffix(a.URL, "go-coverage/master-coverage.html") {
-				master = a.URL
-			}
-			if agent == "" && strings.HasSuffix(a.URL, "go-coverage/agent-coverage.html") {
-				agent = a.URL
-			}
-			webuiSuffix := "webui/react/coverage/lcov-report/index.html"
-			if webui == "" && strings.HasSuffix(a.URL, webuiSuffix) {
-				webui = a.URL
+			if len(specs) == 0 {
+				return nil
 			}
 		}
-		if harness != "" && modelHub != "" && master != "" && agent != "" && webui != "" {
-			break
-		}
+	}
+	return nil
+}
+
+func (s *Server) getRedirect(c echo.Context, suffix, frag string) error {
+	pull, err := strconv.Atoi(c.Param("pull"))
+	if err != nil {
+		return c.String(http.StatusOK, err.Error())
+	}
+
+	spec := SearchSpec{Suffix: suffix}
+	err = s.findMostRecent(pull, &spec)
+	if err != nil {
+		return c.String(http.StatusOK, err.Error())
+	}
+
+	if spec.Result == "" {
+		return c.HTML(
+			http.StatusOK,
+			fmt.Sprintf(`<font color="gray">coverage report not ready</font><br>`),
+		)
+	}
+
+	return c.Redirect(http.StatusTemporaryRedirect, spec.Result + frag)
+}
+
+// GET /pull/:pull/harness-coverage
+func (s *Server) getHarness(c echo.Context) error {
+	return s.getRedirect(c, harnessSuffix, "")
+}
+
+// GET /pull/:pull/model-hub-coverage
+func (s *Server) getModelHub(c echo.Context) error {
+	return s.getRedirect(c, modelHubSuffix, "")
+}
+
+// GET /pull/:pull/master-coverage
+func (s *Server) getMaster(c echo.Context) error {
+	return s.getRedirect(c, masterSuffix, "#file0")
+}
+
+// GET /pull/:pull/agent-coverage
+func (s *Server) getAgent(c echo.Context) error {
+	return s.getRedirect(c, agentSuffix, "#file0")
+}
+
+// GET /pull/:pull/webui-coverage
+func (s *Server) getWebui(c echo.Context) error {
+	return s.getRedirect(c, webuiSuffix, "")
+}
+
+// GET /pull/:pull
+func (s *Server) getPull(c echo.Context) error {
+	pull, err := strconv.Atoi(c.Param("pull"))
+	if err != nil {
+		return c.String(http.StatusOK, err.Error())
+	}
+
+	// find the most recent display urls for each coverage report
+	harness := SearchSpec{Suffix: harnessSuffix}
+	modelHub := SearchSpec{Suffix: modelHubSuffix}
+	master := SearchSpec{Suffix: masterSuffix}
+	agent := SearchSpec{Suffix: agentSuffix}
+	webui := SearchSpec{Suffix: webuiSuffix}
+
+	err = s.findMostRecent(pull, &harness, &modelHub, &master, &agent, &webui)
+	if err != nil {
+		return c.String(http.StatusOK, err.Error())
 	}
 
 	h := strings.Builder{}
@@ -88,11 +159,11 @@ func (s *Server) getPull(c echo.Context) error {
 		}
 	}
 
-	showURL("harness", harness, "")
-	showURL("model_hub", modelHub, "")
-	showURL("master", master, "#file0")
-	showURL("agent", agent, "#file0")
-	showURL("webui", webui, "")
+	showURL("harness", harness.Result, "")
+	showURL("model_hub", modelHub.Result, "")
+	showURL("master", master.Result, "#file0")
+	showURL("agent", agent.Result, "#file0")
+	showURL("webui", webui.Result, "")
 
 	return c.HTML(http.StatusOK, h.String())
 }
@@ -166,7 +237,7 @@ func RefreshArtifactsThread(client *Client, ready <-chan struct{}) {
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Printf("usage: shortcuts SQLITE_PATH SERVER_SPEC\n")
-		fmt.Printf("example: shortcuts sqlite.db :80\n")
+		fmt.Printf("example: shortcuts sqlite.db :5729\n")
 		os.Exit(1)
 	}
 
@@ -189,5 +260,10 @@ func main() {
 
 	e := echo.New()
 	e.GET("/pull/:pull", srv.getPull)
+	e.GET("/pull/:pull/harness-coverage", srv.getHarness)
+	e.GET("/pull/:pull/model-hub-coverage", srv.getModelHub)
+	e.GET("/pull/:pull/master-coverage", srv.getMaster)
+	e.GET("/pull/:pull/agent-coverage", srv.getAgent)
+	e.GET("/pull/:pull/webui-coverage", srv.getWebui)
 	e.Logger.Fatal(e.Start(srvSpec))
 }
