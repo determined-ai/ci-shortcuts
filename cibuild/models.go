@@ -44,7 +44,7 @@ type Build struct {
 
 func (b *Build) UpsertBuildTx(ctx context.Context, db bun.IDB) error {
 	q := db.NewInsert().
-		Model(&b).
+		Model(b).
 		ExcludeColumn("archived").
 		On("CONFLICT (build_num) DO UPDATE").
 		Set("lifecycle = EXCLUDED.lifecycle")
