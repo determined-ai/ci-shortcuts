@@ -14,39 +14,7 @@ import (
 
 var DB *RootDB
 
-// a DBLike is either a *bun.DB or a *bun.Tx
-type DBLike interface {
-	NewInsert() *bun.InsertQuery
-	NewSelect() *bun.SelectQuery
-	NewUpdate() *bun.UpdateQuery
-}
-
-// dbImpl implements our OO-style database interface
-// dbImpl automatically implements DBLike by composition.
-type dbImpl struct {
-	DBLike
-}
-
-// RootDB implements DBLike and dbImpl.
-// Additionally RootDB has a RunInTx() method.
-type RootDB struct {
-	// bun.DB makes RootDB implement DBLike
-	*bun.DB
-	// dbImpl will just contain another pointer to the *bun.DB
-	dbImpl
-}
-
-// RootDB.RunInTx() wraps bun.DB.RunInTx to provide the DB interface without giving access to the
-// actual bun.Tx object.
-/*
-func (db *RootDB) RunInTx(fn func(DB) error) error {
-	bunFn := func(_ context.Context, tx bun.Tx) error {
-		txdb := dbImpl{&tx}
-		return fn(txdb)
-	}
-	return db.DB.RunInTx(context.Background(), nil, bunFn)
-}
-*/
+type RootDB = bun.DB
 
 func NewDB(dbPath string) (RootDB, error) {
 	sqldb, err := sql.Open("sqlite3", dbPath)
@@ -83,6 +51,6 @@ func NewDB(dbPath string) (RootDB, error) {
 	db := bun.NewDB(sqldb, sqlitedialect.New())
 	// db.AddQueryHook(bundebug.NewQueryHook(bundebug.WithVerbose(true)))
 	db.AddQueryHook(bundebug.NewQueryHook())
-	DB = &RootDB{db, dbImpl{db}}
+	DB = db
 	return *DB, nil
 }
