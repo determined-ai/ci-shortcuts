@@ -1,20 +1,22 @@
 package main
 
 import (
-	"os"
-	"net/http"
-	"strconv"
-	"log"
-	"sync"
-	"sort"
-	"strings"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"shortcuts/cibuild"
+	"shortcuts/db"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 )
 
 type Server struct {
-	DB RootDB
+	DB     db.RootDB
 	Client Client
 }
 
@@ -25,7 +27,7 @@ func (s *Server) getPull(c echo.Context) error {
 		return c.String(http.StatusOK, err.Error())
 	}
 
-	builds, err := s.DB.GetBuildsForPull(pull)
+	builds, err := cibuild.GetBuildsForPull(pull)
 	if err != nil {
 		return c.String(http.StatusOK, err.Error())
 	}
@@ -44,7 +46,7 @@ func (s *Server) getPull(c echo.Context) error {
 	var webui string
 
 	for _, b := range builds {
-		artifacts, err := s.Client.GetArtifactsWithCache(s.DB, b)
+		artifacts, err := s.Client.GetArtifactsWithCache(b)
 		if err != nil {
 			return c.String(http.StatusOK, err.Error())
 		}
@@ -119,8 +121,8 @@ func main() {
 	mutex := sync.Mutex{}
 	cond := sync.NewCond(&mutex)
 
-	go client.RefreshArtifactsThread(db, cond, &ready)
-	go client.RefreshBuildsThread(db, cond, &ready)
+	go client.RefreshArtifactsThread(cond, &ready)
+	go client.RefreshBuildsThread(cond, &ready)
 
 	e := echo.New()
 	e.GET("/pull/:pull", srv.getPull)
