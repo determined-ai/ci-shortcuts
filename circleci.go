@@ -1,7 +1,6 @@
 package main
 
 import (
-	// "database/sql"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"shortcuts/ciartifact"
 	"shortcuts/cibuild"
 	"shortcuts/db"
-	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -74,7 +72,7 @@ func (c *Client) GetArtifactsWithCache(b cibuild.Build) ([]ciartifact.Artifact, 
 		return nil, err
 	}
 
-	if b.Lifecycle == "finished" {
+	if b.Outcome != nil {
 		// cache these artifacts
 		err = ciartifact.UpsertArtifacts(artifacts)
 		if err != nil {
@@ -99,7 +97,8 @@ func (c *Client) BootstrapBuilds() error {
 		// Our goal is linking to artifacts, which last for 30 days.
 		boundary := time.Now().AddDate(0, 0, -30)
 
-		for offset := 0; true; offset += 100 {
+		offset := 0
+		for {
 			var builds []cibuild.Build
 			builds, err := c.GetBuilds(100, offset)
 			if err != nil {
@@ -125,6 +124,7 @@ func (c *Client) BootstrapBuilds() error {
 				nreported = nbuilds
 				fmt.Printf("%v builds found so far...\n", nbuilds)
 			}
+			offset += len(builds)
 		}
 
 	report:
@@ -135,7 +135,8 @@ func (c *Client) BootstrapBuilds() error {
 
 func (c *Client) RefreshBuilds(afterBuildNum int) error {
 	return db.DB.RunInTx(context.Background(), nil, func(ctx context.Context, tx bun.Tx) error {
-		for offset := 0; true; offset += 100 {
+		offset := 0
+		for {
 			builds, err := c.GetBuilds(100, offset)
 			if err != nil {
 				return err
@@ -152,17 +153,11 @@ func (c *Client) RefreshBuilds(afterBuildNum int) error {
 					return err
 				}
 			}
+			offset += len(builds)
 		}
 		return nil
 	})
 }
-
-/*
-Strategy:
-- on boostrap, scrape as far back as you can go for coverage artifacts
-- periodically scrape as far back as the oldest non-completed build in the database
-- have a force-refresh page that triggers the scrape when a user loads the page
-*/
 
 func (c *Client) StartupDB(dbPath string) (*bun.DB, error) {
 	db, err := db.NewDB(dbPath)
@@ -206,79 +201,4 @@ func (c *Client) RefreshDB(allowBootstrap bool) error {
 	}
 
 	return nil
-}
-
-func (c *Client) RefreshBuildsThread(cond *sync.Cond, ready *bool) {
-	setReady := func() {
-		cond.L.Lock()
-		defer cond.L.Unlock()
-		*ready = true
-		cond.Signal()
-	}
-
-	for {
-		// refresh every 15 seconds
-		time.Sleep(15 * time.Second)
-		fmt.Printf("refreshing builds\n")
-		err := c.RefreshDB(false)
-		if err != nil {
-			fmt.Printf("error in artifact thread: %v\n", err.Error())
-		}
-		setReady()
-	}
-}
-
-func (c *Client) RefreshArtifactsThread(cond *sync.Cond, ready *bool) {
-	awaitReady := func() {
-		cond.L.Lock()
-		defer cond.L.Unlock()
-		for !*ready {
-			cond.Wait()
-		}
-		// "consume" the ready signal
-		*ready = false
-	}
-
-	// continue archiving until we hit an error or run out of builds
-	cacheMany := func() error {
-		for {
-			// grab the latest archivable build
-			b, err := cibuild.GetArchivableBuild()
-			if err != nil {
-				return err
-			}
-
-			if b == nil {
-				// no cacheable artifacts found
-				return nil
-			}
-
-			fmt.Printf("fetching artifacts for %v\n", b.BuildNum)
-			artifacts, err := c.GetArtifacts(b.BuildNum)
-			if err != nil {
-				return err
-			}
-
-			// cache these artifacts
-			err = ciartifact.UpsertArtifacts(artifacts)
-			if err != nil {
-				return err
-			}
-
-			err = cibuild.ArchiveBuild(b.BuildNum)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	for {
-		// wait for a signal
-		awaitReady()
-		err := cacheMany()
-		if err != nil {
-			fmt.Printf("error in artifact thread: %v\n", err.Error())
-		}
-	}
 }

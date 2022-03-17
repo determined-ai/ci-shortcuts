@@ -5,11 +5,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"shortcuts/ciartifact"
 	"shortcuts/cibuild"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/labstack/echo/v4"
 )
@@ -96,6 +97,72 @@ func (s *Server) getPull(c echo.Context) error {
 	return c.HTML(http.StatusOK, h.String())
 }
 
+
+func RefreshBuildsThread(client *Client, ready chan<- struct{}) {
+	// Every 15 seconds, scrape as far back as the oldest non-completed build in the database.
+	for {
+		time.Sleep(15 * time.Second)
+		fmt.Printf("refreshing builds\n")
+		err := client.RefreshDB(false)
+		if err != nil {
+			fmt.Printf("error in artifact thread: %v\n", err.Error())
+		}
+		// Send a signal to the RefreshBuildsThread if it is waiting.
+		select {
+			case ready <- struct{}{}:
+			default:
+		}
+	}
+}
+
+func RefreshArtifactsThread(client *Client, ready <-chan struct{}) {
+	// Continuously scrape artifacts for finished builds that are not yet archived.
+	// If you run out of finish builds, we pause until the RefreshBuildsThread wakes us up.
+
+	// continue archiving until we hit an error or run out of builds
+	cacheMany := func() error {
+		for {
+			// grab the latest archivable build
+			b, err := cibuild.GetArchivableBuild()
+			if err != nil {
+				return err
+			}
+
+			if b == nil {
+				// no cacheable artifacts found
+				return nil
+			}
+
+			fmt.Printf("fetching artifacts for %v\n", b.BuildNum)
+			artifacts, err := client.GetArtifacts(b.BuildNum)
+			if err != nil {
+				return err
+			}
+
+			// cache these artifacts
+			err = ciartifact.UpsertArtifacts(artifacts)
+			if err != nil {
+				return err
+			}
+
+			err = cibuild.ArchiveBuild(b.BuildNum)
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	for {
+		err := cacheMany()
+		if err != nil {
+			fmt.Printf("error in artifact thread: %v\n", err.Error())
+		}
+		// wait for a signal from the RefreshBuildsThread
+		_ = <-ready
+	}
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Printf("usage: shortcuts SQLITE_PATH SERVER_SPEC\n")
@@ -103,10 +170,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	client := Client{&http.Client{}}
-
 	dbPath := os.Args[1]
 	srvSpec := os.Args[2]
+
+	client := Client{&http.Client{}}
 
 	_, err := client.StartupDB(dbPath)
 	if err != nil {
@@ -115,12 +182,10 @@ func main() {
 
 	srv := Server{client}
 
-	ready := true
-	mutex := sync.Mutex{}
-	cond := sync.NewCond(&mutex)
+	ready := make(chan struct{})
 
-	go client.RefreshArtifactsThread(cond, &ready)
-	go client.RefreshBuildsThread(cond, &ready)
+	go RefreshArtifactsThread(&client, ready)
+	go RefreshBuildsThread(&client, ready)
 
 	e := echo.New()
 	e.GET("/pull/:pull", srv.getPull)

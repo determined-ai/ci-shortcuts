@@ -29,7 +29,7 @@ type Build struct {
 	bun.BaseModel
 
 	BuildNum  int       `json:"build_num" bun:",pk"`
-	Lifecycle string    `json:"lifecycle"`
+	Outcome   *string   `json:"outcome"`
 	URL       string    `json:"build_url"`
 	Subject   string    `json:"subject"`
 	Branch    string    `json:"branch"`
@@ -43,12 +43,12 @@ type Build struct {
 }
 
 func (b *Build) UpsertBuildTx(ctx context.Context, db bun.IDB) error {
-	q := db.NewInsert().
+	_, err := db.NewInsert().
 		Model(b).
 		ExcludeColumn("archived").
 		On("CONFLICT (build_num) DO UPDATE").
-		Set("lifecycle = EXCLUDED.lifecycle")
-	_, err := q.Exec(ctx)
+		Set("outcome = EXCLUDED.outcome").
+		Exec(ctx)
 	return err
 }
 
@@ -58,50 +58,44 @@ func (b *Build) UpsertBuild() error {
 
 func GetBuild(buildNum int) (*Build, error) {
 	b := Build{BuildNum: buildNum}
-	q := db.DB.NewSelect().
+	err := db.DB.NewSelect().
 		Model(&b).
-		WherePK()
-	err := q.Scan(context.Background())
+		WherePK().
+		Scan(context.Background())
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return &b, err
 }
 
 func GetBuildsForPull(pull int) ([]Build, error) {
 	var builds []Build
-	q := db.DB.NewSelect()
-	q = q.Model(&builds)
-	q = q.Where("branch = ?", fmt.Sprintf("pull/%v", pull))
-	err := q.Scan(context.Background())
+	err := db.DB.NewSelect().
+		Model(&builds).
+		Where("branch = ?", fmt.Sprintf("pull/%v", pull)).
+		Scan(context.Background())
 	return builds, err
 }
 
 func OldestUnfinishedBuild() (*Build, error) {
 	var b Build
-	q := db.DB.NewSelect().
+	err := db.DB.NewSelect().
 		Model(&b).
-		Where("lifecycle != ?", "finished").
+		Where("outcome is NULL").
 		Order("build_num ASC").
-		Limit(1)
-	err := q.Scan(context.Background())
+		Limit(1).
+		Scan(context.Background())
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return &b, err
 }
 
 func (before *Build) LatestFinishedBefore() (*Build, error) {
 	var b Build
 	q := db.DB.NewSelect().
 		Model(&b).
-		Where("lifecycle == ?", "finished").
+		Where("outcome is not NULL").
 		Order("build_num DESC").
 		Limit(1)
 	if before != nil {
@@ -111,17 +105,14 @@ func (before *Build) LatestFinishedBefore() (*Build, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return &b, err
 }
 
 func GetArchivableBuild() (*Build, error) {
 	var b Build
 	q := db.DB.NewSelect().
 		Model(&b).
-		Where("lifecycle == ?", "finished").
+		Where("outcome is not NULL").
 		Where("archived == false").
 		Order("build_num DESC").
 		Limit(1)
@@ -129,10 +120,7 @@ func GetArchivableBuild() (*Build, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	return &b, nil
+	return &b, err
 }
 
 func UnarchivedBuilds() ([]Build, error) {

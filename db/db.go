@@ -31,7 +31,7 @@ func NewDB(dbPath string) (*bun.DB, error) {
 			parallel INTEGER NOT NULL,
 			workflow TEXT,
 			start_time TEXT NOT NULL,
-			lifecycle TEXT NOT NULL,
+			outcome TEXT,
 			-- this is our own metadata
 			archived BOOLEAN NOT NULL DEFAULT FALSE
 		);
