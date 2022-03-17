@@ -12,18 +12,15 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 )
 
-var DB *RootDB
+var DB *bun.DB
 
-type RootDB = bun.DB
-
-func NewDB(dbPath string) (RootDB, error) {
+func NewDB(dbPath string) (*bun.DB, error) {
 	sqldb, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		return RootDB{}, err
+		return nil, err
 	}
 
 	// create the database if it doesn't exist
-	// XXX this'll be in bun migrations.
 	_, err = sqldb.Exec(`
 		CREATE TABLE IF NOT EXISTS builds (
 			build_num INTEGER PRIMARY KEY,
@@ -45,12 +42,12 @@ func NewDB(dbPath string) (RootDB, error) {
 	`)
 	if err != nil {
 		sqldb.Close()
-		return RootDB{}, errors.Wrap(err, "creating tables")
+		return nil, errors.Wrap(err, "creating tables")
 	}
 
 	db := bun.NewDB(sqldb, sqlitedialect.New())
 	// db.AddQueryHook(bundebug.NewQueryHook(bundebug.WithVerbose(true)))
 	db.AddQueryHook(bundebug.NewQueryHook())
 	DB = db
-	return *DB, nil
+	return DB, nil
 }

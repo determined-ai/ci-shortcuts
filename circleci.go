@@ -113,7 +113,7 @@ func (c *Client) BootstrapBuilds() error {
 					fmt.Printf(
 						"Quitting after 30 days of builds; artifacts won't exist further back.\n",
 					)
-					goto report // WTF
+					goto report
 				}
 				err = b.UpsertBuildTx(ctx, tx)
 				if err != nil {
@@ -164,7 +164,7 @@ Strategy:
 - have a force-refresh page that triggers the scrape when a user loads the page
 */
 
-func (c *Client) StartupDB(dbPath string) (db.RootDB, error) {
+func (c *Client) StartupDB(dbPath string) (*bun.DB, error) {
 	db, err := db.NewDB(dbPath)
 	if err != nil {
 		return db, err

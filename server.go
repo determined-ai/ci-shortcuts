@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"shortcuts/cibuild"
-	"shortcuts/db"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +15,6 @@ import (
 )
 
 type Server struct {
-	DB     db.RootDB
 	Client Client
 }
 
@@ -110,12 +108,12 @@ func main() {
 	dbPath := os.Args[1]
 	srvSpec := os.Args[2]
 
-	db, err := client.StartupDB(dbPath)
+	_, err := client.StartupDB(dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	srv := Server{db, client}
+	srv := Server{client}
 
 	ready := true
 	mutex := sync.Mutex{}
