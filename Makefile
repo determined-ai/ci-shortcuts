@@ -1,15 +1,15 @@
 all: build
 
 build:
-	go build ./...
+	go build -o shortcuts .
 
 run: build
-	go run ./... sqlite.db :5729
+	./shortcuts sqlite.db :5729
 
 install: build
 	getent passwd shortcuts || useradd --system --shell /bin/true shortcuts
 	install shortcuts /usr/local/bin
-	mkdir /var/cache/shortcuts
+	mkdir -p /var/cache/shortcuts
 	chown shortcuts:shortcuts /var/cache/shortcuts
 	cp shortcuts.service /etc/systemd/system
 	systemctl daemon-reload
