@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -36,6 +37,41 @@ func (c *Client) Get(url string) ([]byte, error) {
 
 	defer resp.Body.Close()
 	return ioutil.ReadAll(resp.Body)
+}
+
+func (c *Client) Post(
+	url string, hdrs map[string]string, body map[string]interface{},
+) ([]byte, error) {
+	byts, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(byts))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Accept", "application/json")
+	for k, v := range hdrs {
+		req.Header.Add(k, v)
+	}
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+	out, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		for k, v := range resp.Header {
+			for _, vv := range v {
+				fmt.Printf("resp: %v=%v\n", k, vv)
+			}
+		}
+	}
+	return out, err
 }
 
 func (c *Client) GetBuilds(limit int, offset int) ([]cibuild.Build, error) {
