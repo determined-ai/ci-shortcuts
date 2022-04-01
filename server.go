@@ -5,18 +5,21 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"shortcuts/ciartifact"
-	"shortcuts/cibuild"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
+
+	"shortcuts/ciartifact"
+	"shortcuts/cibuild"
+	"shortcuts/github"
 )
 
 type Server struct {
 	Client Client
+	Github github.Github
 }
 
 type SearchSpec struct {
@@ -25,11 +28,12 @@ type SearchSpec struct {
 }
 
 const (
-	harnessSuffix = "cov-html/harness/index.html"
-	modelHubSuffix = "cov-html/model_hub/index.html"
-	masterSuffix = "go-coverage/master-coverage.html"
 	agentSuffix = "go-coverage/agent-coverage.html"
+	harnessSuffix = "cov-html/harness/index.html"
+	masterSuffix = "go-coverage/master-coverage.html"
+	modelHubSuffix = "cov-html/model_hub/index.html"
 	webuiSuffix = "webui/react/coverage/lcov-report/index.html"
+	docsSuffix = "docs/site/html/index.html"
 )
 
 // findMostRecent searches artifacts in reverse chronological order looking for the most recent of
@@ -99,14 +103,19 @@ func (s *Server) getRedirect(c echo.Context, suffix, frag string) error {
 	return c.Redirect(http.StatusTemporaryRedirect, spec.Result + frag)
 }
 
+// GET /pull/:pull/agent-coverage
+func (s *Server) getAgent(c echo.Context) error {
+	return s.getRedirect(c, agentSuffix, "#file0")
+}
+
+// GET /pull/:pull/docs
+func (s *Server) getDocs(c echo.Context) error {
+	return s.getRedirect(c, docsSuffix, "")
+}
+
 // GET /pull/:pull/harness-coverage
 func (s *Server) getHarness(c echo.Context) error {
 	return s.getRedirect(c, harnessSuffix, "")
-}
-
-// GET /pull/:pull/model-hub-coverage
-func (s *Server) getModelHub(c echo.Context) error {
-	return s.getRedirect(c, modelHubSuffix, "")
 }
 
 // GET /pull/:pull/master-coverage
@@ -114,9 +123,9 @@ func (s *Server) getMaster(c echo.Context) error {
 	return s.getRedirect(c, masterSuffix, "#file0")
 }
 
-// GET /pull/:pull/agent-coverage
-func (s *Server) getAgent(c echo.Context) error {
-	return s.getRedirect(c, agentSuffix, "#file0")
+// GET /pull/:pull/model-hub-coverage
+func (s *Server) getModelHub(c echo.Context) error {
+	return s.getRedirect(c, modelHubSuffix, "")
 }
 
 // GET /pull/:pull/webui-coverage
@@ -133,6 +142,7 @@ func (s *Server) getPull(c echo.Context) error {
 
 	// find the most recent display urls for each coverage report
 	harness := SearchSpec{Suffix: harnessSuffix}
+	docs := SearchSpec{Suffix: docsSuffix}
 	modelHub := SearchSpec{Suffix: modelHubSuffix}
 	master := SearchSpec{Suffix: masterSuffix}
 	agent := SearchSpec{Suffix: agentSuffix}
@@ -159,13 +169,183 @@ func (s *Server) getPull(c echo.Context) error {
 		}
 	}
 
-	showURL("harness", harness.Result, "")
-	showURL("model_hub", modelHub.Result, "")
-	showURL("master", master.Result, "#file0")
 	showURL("agent", agent.Result, "#file0")
+	showURL("docs", docs.Result, "")
+	showURL("harness", harness.Result, "")
+	showURL("master", master.Result, "#file0")
+	showURL("model_hub", modelHub.Result, "")
 	showURL("webui", webui.Result, "")
 
 	return c.HTML(http.StatusOK, h.String())
+}
+
+func (s *Server) postShortcutComment(installationID int64, prNumber int) error {
+	// POST a comment with the shortcuts:
+	//
+	//    Shortcuts to the latest built artifacts for:
+	//    - all coverage reports (agent, harness, master, model_hub, webui)
+	//
+	// Note we put line breaks within the hyperlink syntax to "hide" them in the rendered comment.
+	msg := fmt.Sprintf(`Shortcuts to the latest built artifacts for:
+- [all coverage reports](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v
+) ([agent](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/agent-coverage
+), [harness](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/harness-coverage
+), [master](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/master-coverage
+), [model_hub](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/model-hub-coverage
+), [webui](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/webui-coverage))
+- [docs](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/docs)`, prNumber)
+	body := map[string]interface{}{"body": msg}
+	url := fmt.Sprintf(
+		"https://api.github.com/repos/determined-ai/determined/issues/%v/comments", prNumber,
+	)
+	resp, err := s.Github.Post(installationID, url, body, http.StatusCreated)
+	if err != nil {
+		fmt.Printf("failed to post comment: %v: %v\n", err, string(resp))
+		return err
+	}
+
+	fmt.Printf("posted comment to pull/%v: %v\n", prNumber, string(resp))
+	return nil
+}
+
+func (s *Server) pullRequestWebhook(c echo.Context) error {
+	// Parse the relevant parts of the webhook.
+	type Repository struct {
+		FullName string `json:"full_name"`
+	}
+
+	type Installation struct {
+		ID int64 `json:"id"`
+	}
+
+	type PRHook struct {
+		Action       string       `json:"action"`
+		Number       int          `json:"number"`
+		Repository   Repository   `json:"repository"`
+		Installation Installation `json:"installation"`
+	}
+
+	var prhook PRHook
+	err := c.Bind(&prhook)
+	if err != nil {
+		// Print error body to logs, but not in response (no error oracles).
+		fmt.Printf("error unmarshaling request: %v\n", err)
+		return c.String(
+			http.StatusInternalServerError, fmt.Sprintf("ignoring request: unmarshaling error"),
+		)
+	}
+
+	// We are only interested in the determined-ai/determined repository.
+	if prhook.Repository.FullName != "determined-ai/determined" {
+		return c.String(http.StatusBadRequest, "ignoring request; repo != determined-ai/determined")
+	}
+
+	// We are only interested in new pull requests.
+	if prhook.Action != "opened" {
+		return c.String(http.StatusBadRequest, "ignoring request; action != opened")
+	}
+
+	err = s.postShortcutComment(prhook.Installation.ID, prhook.Number)
+	if err != nil {
+		return c.String(
+			http.StatusInternalServerError, fmt.Sprintf("failed to post comment"),
+		)
+	}
+
+	return c.String(
+		http.StatusOK, fmt.Sprintf("posted comment to pull/%v\n", prhook.Number),
+	)
+}
+
+func (s *Server) issueCommentWebhook(c echo.Context) error {
+	// Parse the relevant parts of the webhook.
+	type Issue struct {
+		Number int `json:"number"`
+	}
+
+	type User struct {
+		Login string `json:"login"`
+	}
+
+	type Comment struct {
+		User User `json:"user"`
+		Body string `json:"body"`
+	}
+
+	type Repository struct {
+		FullName string `json:"full_name"`
+	}
+
+	type Installation struct {
+		ID int64 `json:"id"`
+	}
+
+	type PRHook struct {
+		Action       string       `json:"action"`
+		Issue        Issue        `json:"issue"`
+		Comment      Comment      `json:"comment"`
+		Repository   Repository   `json:"repository"`
+		Installation Installation `json:"installation"`
+	}
+
+	var prhook PRHook
+	err := c.Bind(&prhook)
+	if err != nil {
+		// Print error body to logs, but not in response (no error oracles).
+		fmt.Printf("error unmarshaling request: %v\n", err)
+		return c.String(
+			http.StatusInternalServerError, fmt.Sprintf("ignoring request: unmarshaling error"),
+		)
+	}
+
+	// We are only interested in the determined-ai/determined repository.
+	if prhook.Repository.FullName != "determined-ai/determined" {
+		return c.String(http.StatusBadRequest, "ignoring request; repo != determined-ai/determined")
+	}
+
+	// We are only interested in created or edited comments.
+	if prhook.Action != "created" && prhook.Action != "edited" {
+		return c.String(http.StatusBadRequest, "ignoring request; action not in [created, edited]")
+	}
+
+	// Don't ever respond to our own comments.
+	if prhook.Comment.User.Login == "det-ci[bot]" {
+		return c.String(http.StatusBadRequest, "ignoring request; not responding to own comment")
+	}
+
+	// Only respond to the command: "@det-ci shortcuts".
+	if !strings.Contains(prhook.Comment.Body, "@det-ci[bot] shortcuts") {
+		return c.String(http.StatusBadRequest, "ignoring request; no command found")
+	}
+
+	err = s.postShortcutComment(prhook.Installation.ID, prhook.Issue.Number)
+	if err != nil {
+		return c.String(
+			http.StatusInternalServerError, fmt.Sprintf("failed to post comment"),
+		)
+	}
+
+	return c.String(
+		http.StatusOK, fmt.Sprintf("posted comment to pull/%v\n", prhook.Issue.Number),
+	)
+}
+
+// POST /app-hook
+func (s *Server) githubAppHook(c echo.Context) error {
+	// Do some initial routing by X-Github-Event header.
+	hdr, ok := c.Request().Header["X-Github-Event"]
+	if !ok {
+		return c.String(http.StatusBadRequest, "ignoring request; X-Github-Event header missing")
+	}
+	switch hdr[0] {
+	case "pull_request":
+		return s.pullRequestWebhook(c)
+	case "issue_comment":
+		return s.issueCommentWebhook(c)
+	}
+	return c.String(
+		http.StatusBadRequest, fmt.Sprintf("ignoring request; X-Github-Event = %v", hdr[0]),
+	)
 }
 
 
@@ -234,24 +414,61 @@ func RefreshArtifactsThread(client *Client, ready <-chan struct{}) {
 	}
 }
 
+// Make the github app behavior optional to make local development eaiser (local github apps
+// isn't really feasible anyway, since a local server won't recieve the github webhooks).
+func configureGithubApp() (github.Github, bool, error) {
+	var gh github.Github
+	appidStr, ok := os.LookupEnv("GITHUB_APP_ID")
+	if !ok {
+		println("warning: no GITHUB_APP_ID found, will not run github app")
+		return gh, false, nil
+	}
+
+	appid, err := strconv.ParseInt(appidStr, 10, 64)
+	if err != nil {
+		return gh, false, fmt.Errorf("failed to parse GITHUB_APP_ID: %s", err)
+	}
+
+	keypath, ok := os.LookupEnv("GITHUB_APP_KEYPATH")
+	if !ok {
+		println("warning: no GITHUB_APP_KEYPATH found, will not run github app")
+		return gh, false, nil
+	}
+
+	gh, err = github.New(appid, keypath)
+	if err != nil {
+		return gh, false, err
+	}
+
+	return gh, true, nil
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Printf("usage: shortcuts SQLITE_PATH SERVER_SPEC\n")
 		fmt.Printf("example: shortcuts sqlite.db :5729\n")
+		fmt.Printf("environment variables:\nGITHUB_APP_ID: the, \n")
+		fmt.Printf("    GITHUB_APP_ID: the App ID from github.com/settings/apps/APP-NAME\n")
+		fmt.Printf("    GITHUB_APP_KEYPATH: ")
+		fmt.Printf("path to private key generated from github.com/settings/apps/APP-NAME\n")
 		os.Exit(1)
+	}
+
+	gh, runGithubApp, err := configureGithubApp()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	dbPath := os.Args[1]
 	srvSpec := os.Args[2]
 
 	client := Client{&http.Client{}}
-
-	_, err := client.StartupDB(dbPath)
+	_, err = client.StartupDB(dbPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	srv := Server{client}
+	srv := Server{client, gh}
 
 	ready := make(chan struct{})
 
@@ -260,10 +477,14 @@ func main() {
 
 	e := echo.New()
 	e.GET("/pull/:pull", srv.getPull)
-	e.GET("/pull/:pull/harness-coverage", srv.getHarness)
-	e.GET("/pull/:pull/model-hub-coverage", srv.getModelHub)
-	e.GET("/pull/:pull/master-coverage", srv.getMaster)
 	e.GET("/pull/:pull/agent-coverage", srv.getAgent)
+	e.GET("/pull/:pull/docs", srv.getDocs)
+	e.GET("/pull/:pull/harness-coverage", srv.getHarness)
+	e.GET("/pull/:pull/master-coverage", srv.getMaster)
+	e.GET("/pull/:pull/model-hub-coverage", srv.getModelHub)
 	e.GET("/pull/:pull/webui-coverage", srv.getWebui)
+	if runGithubApp {
+		e.POST("/app-hook", srv.githubAppHook)
+	}
 	e.Logger.Fatal(e.Start(srvSpec))
 }
