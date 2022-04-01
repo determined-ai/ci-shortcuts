@@ -33,6 +33,7 @@ const (
 	masterSuffix = "go-coverage/master-coverage.html"
 	modelHubSuffix = "cov-html/model_hub/index.html"
 	webuiSuffix = "webui/react/coverage/lcov-report/index.html"
+	docsSuffix = "docs/site/html/index.html"
 )
 
 // findMostRecent searches artifacts in reverse chronological order looking for the most recent of
@@ -107,6 +108,11 @@ func (s *Server) getAgent(c echo.Context) error {
 	return s.getRedirect(c, agentSuffix, "#file0")
 }
 
+// GET /pull/:pull/docs
+func (s *Server) getDocs(c echo.Context) error {
+	return s.getRedirect(c, docsSuffix, "")
+}
+
 // GET /pull/:pull/harness-coverage
 func (s *Server) getHarness(c echo.Context) error {
 	return s.getRedirect(c, harnessSuffix, "")
@@ -136,6 +142,7 @@ func (s *Server) getPull(c echo.Context) error {
 
 	// find the most recent display urls for each coverage report
 	harness := SearchSpec{Suffix: harnessSuffix}
+	docs := SearchSpec{Suffix: docsSuffix}
 	modelHub := SearchSpec{Suffix: modelHubSuffix}
 	master := SearchSpec{Suffix: masterSuffix}
 	agent := SearchSpec{Suffix: agentSuffix}
@@ -163,6 +170,7 @@ func (s *Server) getPull(c echo.Context) error {
 	}
 
 	showURL("agent", agent.Result, "#file0")
+	showURL("docs", docs.Result, "")
 	showURL("harness", harness.Result, "")
 	showURL("master", master.Result, "#file0")
 	showURL("model_hub", modelHub.Result, "")
@@ -184,7 +192,8 @@ func (s *Server) postShortcutComment(installationID int64, prNumber int) error {
 ), [harness](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/harness-coverage
 ), [master](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/master-coverage
 ), [model_hub](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/model-hub-coverage
-), [webui](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/webui-coverage))`, prNumber)
+), [webui](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/webui-coverage))
+- [docs](https://det-ci.dzhu.dev/shortcuts/pull/%[1]v/docs)`, prNumber)
 	body := map[string]interface{}{"body": msg}
 	url := fmt.Sprintf(
 		"https://api.github.com/repos/determined-ai/determined/issues/%v/comments", prNumber,
@@ -469,6 +478,7 @@ func main() {
 	e := echo.New()
 	e.GET("/pull/:pull", srv.getPull)
 	e.GET("/pull/:pull/agent-coverage", srv.getAgent)
+	e.GET("/pull/:pull/docs", srv.getDocs)
 	e.GET("/pull/:pull/harness-coverage", srv.getHarness)
 	e.GET("/pull/:pull/master-coverage", srv.getMaster)
 	e.GET("/pull/:pull/model-hub-coverage", srv.getModelHub)
