@@ -30,7 +30,7 @@ sudo su
 
 # pull updates
 cd /root/ci-shortcuts
-git pull origin master
+git pull origin main
 
 # rebuild/reinstall
 make install
